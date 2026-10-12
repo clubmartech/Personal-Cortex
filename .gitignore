@@ -1,0 +1,17 @@
+# Só o motor entra no repositório. Memória pessoal nunca.
+store.jsonl
+events.jsonl
+*.jsonl
+profile.md
+principles.md
+EVOLUTION.md
+projects/
+journal/
+inbox/
+bridge/
+chats/
+archive/
+__pycache__/
+*.pyc
+*.bak*
+.DS_Store

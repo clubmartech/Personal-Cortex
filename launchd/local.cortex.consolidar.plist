@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Curadoria semanal (domingo 19h). Troque SEU_USUARIO, copie para ~/Library/LaunchAgents/
+     e carregue: launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.cortex.consolidar.plist
+     Para rodar headless, autentique uma vez o CLI: claude setup-token -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>local.cortex.consolidar</string>
+  <key>ProgramArguments</key>
+  <array><string>/Users/SEU_USUARIO/.claude/cortex/bin/consolidar-semanal.sh</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>19</integer><key>Minute</key><integer>0</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardErrorPath</key><string>/Users/SEU_USUARIO/.claude/cortex/journal/_agendador.err</string>
+  <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>

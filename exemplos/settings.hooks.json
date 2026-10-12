@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python3 \"$HOME/.claude/cortex/bin/cortex.py\" context --project \"${CLAUDE_PROJECT_DIR:-$PWD}\"" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "python3 \"$HOME/.claude/cortex/bin/cortex.py\" maintain --quiet" } ] }
+    ]
+  }
+}
