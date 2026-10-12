@@ -420,7 +420,7 @@ def bridge_markdown():
            "",
            "Regras aprendidas com o uso real. Trate como preferencia forte do usuario.",
            ""]
-    for k in ["identity", "preference", "workflow", "principle", "correction", "reference"]:
+    for k in ["identity", "preference", "workflow", "principle", "correction", "project", "reference"]:
         if g.get(k):
             out.append(f"## {KIND_LABEL[k]}")
             out += [f"- {r['text']}" + (f" — {r['why']}" if r.get("why") else "")
