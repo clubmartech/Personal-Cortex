@@ -87,6 +87,24 @@ engenharia) · `workflow` (como conduz o trabalho) · `project` (fato do reposit
    regras). Isso é o que dá leitura racional ao histórico.
 5. Reporte: quantas regras entraram, saíram, mudaram — e o que isso indica.
 
+## Trilhas de raciocínio (atos)
+
+Além das regras, o Cortex mapeia **o tipo de cada pedido** — o ato — e a **sequência** entre atos em cada conversa: viabilidade, desenho, avaliação, execução, publicação, delegação, consulta, correção, preferência. Registra a linha de raciocínio, não o resultado. Motor: `bin/atos.py`.
+
+| Camada | Quando | O quê |
+|---|---|---|
+| Captura | toda mensagem (hook `UserPromptSubmit`) | `atos.py hook-prompt` grava o ato em `atos/<projeto>.jsonl` e devolve `<cortex-ato>`: ato provável, ato anterior na conversa, forma esperada da resposta, o que costuma vir depois |
+| Destilação | fim de sessão e consolidação semanal | `atos.py destilar` recalcula `trilhas.json` e `trilhas.md` (transições com 2+ ocorrências, por projeto e global) |
+| Injeção | início de sessão (hook `SessionStart`) | `atos.py contexto` entrega `<cortex-trilhas>` (≤1.400 caracteres) |
+
+Como usar o sinal:
+
+- **Mire o degrau pedido.** Viabilidade pede sim/não, desenho curto e oferta do próximo passo — não a execução. Desenho pede proposta com decisões abertas — não código. Execução pede fazer e verificar.
+- **Prever não é autorizar.** "Depois de desenho costuma vir execução" calibra a resposta; não permite executar antes do pedido.
+- **Classificação é heurística.** Se errar de forma recorrente, acrescente padrão em `atos-regras.json` (`{"padroes": {"<ato>": ["regex"]}, "formas": {"<ato>": "…"}}`); se a forma esperada mudou, troque a forma ali.
+- **Trilha estável vira regra.** Na consolidação, transições fortes e repetidas viram `cortex observe --kind workflow` com a evidência de `trilhas.md`.
+- Os textos ficam só nesta máquina (`atos/`, fora de qualquer repositório).
+
 ## Multi-agente
 
 `cortex sync` injeta o perfil entre marcadores `CORTEX:BEGIN/END` em

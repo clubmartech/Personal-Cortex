@@ -81,6 +81,7 @@ registrar_run "$OUTCOME"
 
 # manutencao mecanica sempre roda, mesmo se a curadoria pelo modelo falhar
 python3 "$CORTEX/bin/cortex.py" maintain --quiet
+python3 "$CORTEX/bin/atos.py" destilar --quiet 2>/dev/null || true
 echo "--- saida do cortex status ---"
 python3 "$CORTEX/bin/cortex.py" status
 echo "=== fim (exit=$STATUS) ==="
