@@ -13,6 +13,9 @@ class Atos(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         os.environ["CORTEX_HOME"] = self.tmp.name
+        # a ponte nunca pode tocar o AGENTS.md real de quem roda os testes
+        os.environ["CORTEX_PONTE_ALVOS"] = os.path.join(self.tmp.name, "ponte-AGENTS.md")
+        self.addCleanup(os.environ.pop, "CORTEX_PONTE_ALVOS", None)
         sys.path.insert(0, str(BIN))
         import importlib
         import atos
@@ -101,7 +104,6 @@ class Atos(unittest.TestCase):
         alvo = os.path.join(t, "AGENTS.md")
         Path(alvo).write_text("# Regras do Codex\n")
         os.environ["CORTEX_PONTE_ALVOS"] = alvo
-        self.addCleanup(os.environ.pop, "CORTEX_PONTE_ALVOS", None)
         d = self.a.destilar()
         self.assertEqual(d["falhas"]["antes_por_dominio"].get("audiovisual"), 2)
         self.assertIn("referencia_vaga", d["falhas"]["antes_por_sinal"])
