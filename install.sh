@@ -14,7 +14,7 @@ for c in "$ORIGEM"/commands/cortex-*.md; do cp "$c" "$HOME/.claude/commands/"; d
 python3 "$DEST/bin/cortex.py" status
 # trilhas de raciocínio: semeia com o histórico local de conversas (só leitura; nada sai da máquina)
 if [ -d "$HOME/.claude/projects" ] && [ "${CORTEX_SEM_HISTORICO:-0}" != "1" ]; then
-  python3 "$DEST/bin/atos.py" importar "$HOME/.claude/projects" || true
+  python3 "$DEST/bin/atos.py" importar || true
 fi
 # hooks no ~/.claude/settings.json: mescla sem duplicar, com backup (CORTEX_SEM_HOOKS=1 desliga)
 if [ "${CORTEX_SEM_HOOKS:-0}" != "1" ]; then
@@ -41,5 +41,31 @@ if add:
 print("hooks: %d acrescentado(s) em %s%s" % (add, alvo, " (backup .bak-cortex)" if add else ""))
 PY
 fi
+# Codex: mesmos hooks de trilhas em ~/.codex/hooks.json (CORTEX_SEM_CODEX=1 desliga). O Codex pede para confiar
+# em hooks novos na próxima abertura; a ponte (~/.codex/AGENTS.md) é atualizada a cada destilação.
+if [ -d "$HOME/.codex" ] && [ "${CORTEX_SEM_CODEX:-0}" != "1" ] && [ "${CORTEX_SEM_HOOKS:-0}" != "1" ]; then
+  python3 - "$ORIGEM/exemplos/codex-hooks.json" "$HOME/.codex/hooks.json" <<'PY'
+import json, os, shutil, sys
+modelo, alvo = sys.argv[1], sys.argv[2]
+novos = json.load(open(modelo, encoding="utf-8"))["hooks"]
+atual = json.load(open(alvo, encoding="utf-8")) if os.path.exists(alvo) else {}
+existentes = {h.get("command") for ev in (atual.get("hooks") or {}).values() for g in ev for h in g.get("hooks", [])}
+add = 0
+for evento, grupos in novos.items():
+    for g in grupos:
+        faltam = [h for h in g["hooks"] if h["command"] not in existentes]
+        if faltam:
+            atual.setdefault("hooks", {}).setdefault(evento, []).append(dict(g, hooks=faltam))
+            add += len(faltam)
+if add:
+    if os.path.exists(alvo):
+        shutil.copy2(alvo, alvo + ".bak-cortex")
+    tmp = alvo + ".tmp-cortex"
+    json.dump(atual, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    os.replace(tmp, alvo)
+print("codex: %d hook(s) acrescentado(s) em %s%s" % (add, alvo, " — confirme a confiança deles no Codex" if add else ""))
+PY
+  python3 "$DEST/bin/atos.py" ponte || true
+fi
 echo
-echo "Instalado em $DEST. Reinicie o Claude Code para os hooks valerem."
+echo "Instalado em $DEST. Reinicie o Claude Code (e o Codex) para os hooks valerem."

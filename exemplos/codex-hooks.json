@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/cortex/bin/atos.py\" contexto --project \"$PWD\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/cortex/bin/atos.py\" hook-prompt --fonte codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

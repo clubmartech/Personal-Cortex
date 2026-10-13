@@ -97,6 +97,17 @@ Além das regras, o Cortex mapeia **o tipo de cada pedido** — o ato — e a **
 | Destilação | fim de sessão e consolidação semanal | `atos.py destilar` recalcula `trilhas.json` e `trilhas.md` (transições com 2+ ocorrências, por projeto e global) |
 | Injeção | início de sessão (hook `SessionStart`) | `atos.py contexto` entrega `<cortex-trilhas>` (≤1.400 caracteres) |
 
+Além do ato, cada pedido recebe:
+
+- **domínio** (audiovisual, textual, código, dados, operação) — trilhas por domínio, sem misturar com a global;
+- **riscos de entendimento** — referência vaga ("arruma isso"), pedidos múltiplos no mesmo turno;
+- **provável digitação** — palavra nunca vista a 1 edição de um termo frequente do vocabulário real ("implemnta" ≈ "implementa"); a classificação usa o texto corrigido, o registro guarda o original;
+- **pontos de falha aprendidos** — que tipo de pedido, sinal e domínio antecederam correções.
+
+**Leitura de período** (`atos.py linha --desde AAAA-MM-DD [--dominio audiovisual]`): por conversa, objetivo inicial → degraus → desvios corrigidos → último pedido → **output final** (lido do transcript). Leia como linha de raciocínio — por que cada degrau veio e onde o entendimento se desviou —, não como resumo de conteúdo.
+
+**Codex:** importação das sessões abertas por pessoa (as `codex exec` disparadas por script ficam fora), hook `--fonte codex` com o mesmo filtro, e ponte em `~/.codex/AGENTS.md` (bloco `CORTEX-TRILHAS`) com seções de conteúdo audiovisual e textual, atualizada a cada destilação.
+
 Como usar o sinal:
 
 - **Mire o degrau pedido.** Viabilidade pede sim/não, desenho curto e oferta do próximo passo — não a execução. Desenho pede proposta com decisões abertas — não código. Execução pede fazer e verificar.

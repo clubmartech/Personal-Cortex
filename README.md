@@ -45,6 +45,9 @@ Além de regras, o Cortex mapeia **o tipo de cada pedido** (viabilidade, desenho
 - **Semente:** o `install.sh` importa o histórico local de conversas do Claude Code (`~/.claude/projects`) para as trilhas valerem desde o primeiro dia. `CORTEX_SEM_HISTORICO=1` desliga.
 - **Regra de ouro:** prever não é autorizar. A trilha calibra a resposta; nunca executa o próximo passo sem pedido.
 - **Privacidade:** textos e trilhas ficam em `~/.claude/cortex/atos/` e `trilhas.*`, nesta máquina; o `.gitignore` deste repositório os exclui.
+- **Previsão de falha:** cada pedido leva domínio, riscos de entendimento (referência vaga, pedidos múltiplos) e provável erro de digitação contra o vocabulário real da pessoa; a classificação lê a intenção corrigida. As correções ensinam onde o entendimento costuma falhar.
+- **Leitura de período:** `atos.py linha --desde AAAA-MM-DD [--dominio audiovisual|textual]` monta, por conversa, objetivo → degraus → desvios → output final.
+- **Codex:** importa as sessões abertas por pessoa (ignora `codex exec` disparado por script), instala o hook `--fonte codex` em `~/.codex/hooks.json` e mantém o bloco `CORTEX-TRILHAS` no `~/.codex/AGENTS.md`, com seções de conteúdo audiovisual e textual. `CORTEX_SEM_CODEX=1` desliga.
 - **Ajuste:** `atos-regras.json` acrescenta padrões e troca a forma esperada de cada ato. `atos.py classificar "texto"` mostra como um pedido seria lido.
 
 Linha sugerida para o `~/.claude/CLAUDE.md`:

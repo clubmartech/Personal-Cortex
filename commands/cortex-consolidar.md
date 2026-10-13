@@ -10,7 +10,10 @@ regras, não só acrescente.
 Comece por `~/.claude/cortex/bin/cortex status` e
 `~/.claude/cortex/bin/cortex list --status active`.
 
-Depois, rode `~/.claude/cortex/bin/atos.py destilar` e leia `~/.claude/cortex/trilhas.md`:
+Depois, rode `~/.claude/cortex/bin/atos.py linha --desde <data da última consolidação>` e leia
+como linha de raciocínio (objetivo → degraus → desvios → output final), não como conteúdo: o que
+levou a cada correção, que sinal veio antes, o que o output final revela sobre a intenção real.
+Em seguida rode `~/.claude/cortex/bin/atos.py destilar` e leia `~/.claude/cortex/trilhas.md`:
 transições fortes e repetidas viram regra `workflow` (com a evidência); classificação errada vira
 padrão em `~/.claude/cortex/atos-regras.json`; forma de resposta que deixou de valer é trocada ali.
 
