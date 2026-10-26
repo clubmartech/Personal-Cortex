@@ -9,7 +9,7 @@ e' RENDER gerado a partir do store. Nao edite os renders a mao.
 Ciclo:  observe -> promote (com evidencia) -> render -> sync (ensina outras apps)
         absorb (aprende de outras apps) -> prune (decai o que nao se sustenta)
 """
-import argparse, hashlib, json, os, re, sys, unicodedata
+import argparse, fcntl, glob, hashlib, json, os, re, shutil, sys, time, unicodedata, uuid
 from datetime import datetime, timedelta, timezone
 
 HOME = os.path.expanduser("~")
@@ -20,6 +20,8 @@ PROJECTS_DIR = os.path.join(ROOT, "projects")
 JOURNAL_DIR = os.path.join(ROOT, "journal")
 INBOX_DIR = os.path.join(ROOT, "inbox")
 BRIDGE_DIR = os.path.join(ROOT, "bridge")
+LOCK = os.path.join(ROOT, "store.lock")
+SNAP_DIR = os.path.join(ROOT, "backups")
 USER_NAME = os.environ.get("CORTEX_USER_NAME", "o usuário")  # como o perfil chama o interlocutor
 
 KINDS = ["identity", "preference", "principle", "workflow", "project", "reference", "correction"]
@@ -38,6 +40,14 @@ ACTIVE_TTL_DAYS = 120          # regra ativa fraca sem reforco vai p/ arquivo
 STRONG_SEEN = 4                # a partir daqui a regra e' considerada consolidada
 CONTEXT_BUDGET = 14000          # chars injetados por sessao (global)
 PROJECT_BUDGET = 6000
+
+# Trava contra a perda de 20/10/2026: varias sessoes encerrando juntas rodavam
+# `maintain` em paralelo, gravando pelo mesmo store.jsonl.tmp; uma truncava o
+# arquivo da outra e o store virava 0 byte sem erro visivel.
+LOCK_WAIT_S = 20               # espera maxima pela trava (o hook de SessionEnd tem 30 s)
+SHRINK_MAX = 0.20              # gravacao que encolhe o store mais que isso e' recusada
+SNAP_KEEP = 14                 # snapshots diarios do store mantidos em backups/
+PERMITIR_ENCOLHER = False      # ligado por `cortex --permitir-encolher <cmd>`
 
 MARK_BEGIN = "<!-- CORTEX:BEGIN (gerado por ~/.claude/cortex/bin/cortex.py sync - nao editar dentro do bloco) -->"
 MARK_END = "<!-- CORTEX:END -->"
@@ -79,28 +89,60 @@ def slugify(path):
     return re.sub(r"[^a-z0-9]+", "-", s).strip("-") or "root"
 
 
-def read_jsonl(path):
+class StoreError(Exception):
+    """Store ilegivel ou gravacao perigosa: o comando para sem gravar nada."""
+
+
+def read_jsonl(path, estrito=False):
+    """estrito: linha invalida derruba a leitura em vez de sumir em silencio."""
     if not os.path.exists(path):
         return []
-    out = []
-    with open(path, "r", encoding="utf-8") as f:
+    out, ruins = [], 0
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if line:
                 try:
                     out.append(json.loads(line))
                 except json.JSONDecodeError:
-                    pass
+                    ruins += 1
+    if estrito and ruins:
+        raise StoreError(f"{path}: {ruins} linha(s) invalida(s) de {ruins + len(out)}; nada foi gravado. "
+                         f"Restaure de {SNAP_DIR}/ ou reconstrua a partir de {EVENTS}.")
     return out
 
 
 def write_jsonl(path, rows):
-    tmp = path + ".tmp"
+    # temporario unico por processo: com nome fixo, dois gravadores truncavam o arquivo um do outro
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(tmp, "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def trava(esperar=True):
+    """Exclusao mutua entre processos para o ciclo ler->gravar inteiro de um comando.
+    Devolve o descritor (solto quando o processo termina) ou None se nao conseguiu."""
+    os.makedirs(ROOT, exist_ok=True)
+    fd = os.open(LOCK, os.O_CREAT | os.O_RDWR, 0o644)
+    limite = time.monotonic() + (LOCK_WAIT_S if esperar else 0)
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= limite:
+                os.close(fd)
+                return None
+            time.sleep(0.1)
 
 
 def log_event(kind, rec, note=""):
@@ -120,10 +162,36 @@ def rid(scope, project, text):
 
 
 def load():
-    return read_jsonl(STORE)
+    rows = read_jsonl(STORE, estrito=True)
+    # store vazio com historico no log e' a assinatura de 20/10, nao uma instalacao nova
+    if not rows and not PERMITIR_ENCOLHER and os.path.exists(EVENTS) and os.path.getsize(EVENTS) > 0:
+        raise StoreError(f"{STORE} esta vazio mas {EVENTS} tem historico; nada foi gravado. "
+                         f"Restaure de {SNAP_DIR}/ ou reconstrua a partir do log.")
+    return rows
+
+
+def _snapshot():
+    """Uma copia do store por dia, antes da primeira gravacao do dia; guarda SNAP_KEEP dias."""
+    if not os.path.exists(STORE) or os.path.getsize(STORE) == 0:
+        return
+    os.makedirs(SNAP_DIR, exist_ok=True)
+    dest = os.path.join(SNAP_DIR, f"store-{today()}.jsonl")
+    if not os.path.exists(dest):
+        tmp = f"{dest}.{os.getpid()}.tmp"
+        shutil.copy2(STORE, tmp)
+        os.replace(tmp, dest)
+    for velho in sorted(glob.glob(os.path.join(SNAP_DIR, "store-*.jsonl")))[:-SNAP_KEEP]:
+        os.remove(velho)
 
 
 def save(rows):
+    antigo = len(read_jsonl(STORE, estrito=True))
+    novo = len(rows)
+    if antigo and not PERMITIR_ENCOLHER and (novo == 0 or novo < antigo * (1 - SHRINK_MAX)):
+        log_event("save_recusado", {}, f"{antigo} -> {novo} linhas")
+        raise StoreError(f"gravacao recusada: o store cairia de {antigo} para {novo} linha(s). "
+                         "Se for intencional, repita com `cortex --permitir-encolher <comando>`.")
+    _snapshot()
     write_jsonl(STORE, rows)
 
 
@@ -242,20 +310,23 @@ def cmd_promote(a):
 # -------------------------------------------------------------------- prune
 def cmd_prune(a):
     rows = load()
-    kept, dropped, archived = [], 0, 0
+    kept, dropped, archived, eventos = [], 0, 0, []
     for r in rows:
         st, age = r.get("status"), days_since(r.get("updated", r.get("created", today())))
         if st == "candidate" and age > CANDIDATE_TTL_DAYS and r.get("seen", 1) < PROMOTE_THRESHOLD:
-            log_event("dropped", r, f"candidato sem reforco ha {age}d")
+            eventos.append(("dropped", r, f"candidato sem reforco ha {age}d"))
             dropped += 1
             continue
         if st == "active" and age > ACTIVE_TTL_DAYS and r.get("seen", 1) < STRONG_SEEN and not r.get("explicit"):
             r["status"] = "archived"
             r["updated"] = today()
-            log_event("archived", r, f"sem reforco ha {age}d")
+            eventos.append(("archived", r, f"sem reforco ha {age}d"))
             archived += 1
         kept.append(r)
-    save(kept)
+    if dropped or archived:
+        save(kept)   # o log so registra o que a gravacao efetivou
+        for ev in eventos:
+            log_event(*ev)
     if not a.quiet:
         print(f"podados: {dropped} candidatos descartados, {archived} regras arquivadas")
     return 0
@@ -469,11 +540,21 @@ def inject(path, content, comment_style="html"):
 
 
 def cmd_sync(a):
+    rows = load()
+    # nao espalhar para as outras ferramentas um perfil que encolheu de repente
+    ativas = sum(1 for r in rows if r.get("status") == "active")
+    try:
+        antes = len(json.load(open(os.path.join(BRIDGE_DIR, "cortex.json"), encoding="utf-8")).get("rules", []))
+    except (OSError, ValueError):
+        antes = 0
+    if antes and not PERMITIR_ENCOLHER and ativas < antes * (1 - SHRINK_MAX):
+        log_event("sync_recusado", {}, f"{antes} -> {ativas} regras ativas")
+        raise StoreError(f"sync recusado: as regras ativas cairiam de {antes} para {ativas}. "
+                         "Se for intencional, repita com `cortex --permitir-encolher sync`.")
     render_all()
     md = bridge_markdown()
     os.makedirs(BRIDGE_DIR, exist_ok=True)
     open(os.path.join(BRIDGE_DIR, "CORTEX.md"), "w", encoding="utf-8").write(md)
-    rows = load()
     json.dump({
         "generated": now_iso(),
         "source": "~/.claude/cortex/store.jsonl",
@@ -604,6 +685,8 @@ def cmd_maintain(a):
 # --------------------------------------------------------------------- main
 def main():
     p = argparse.ArgumentParser(prog="cortex", description="Memoria evolutiva multi-agente")
+    p.add_argument("--permitir-encolher", action="store_true",
+                   help="aceita gravacao ou sync que reduza o store/perfil mais que o limite (intencional)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     o = sub.add_parser("observe", help="registra um sinal aprendido")
@@ -653,8 +736,24 @@ def main():
     l.set_defaults(func=cmd_list)
 
     a = p.parse_args()
+    global PERMITIR_ENCOLHER
+    PERMITIR_ENCOLHER = a.permitir_encolher
     os.makedirs(ROOT, exist_ok=True)
-    sys.exit(a.func(a) or 0)
+    if a.func not in (cmd_context, cmd_status, cmd_list):
+        # todo comando que grava segura a trava do inicio ao fim; o maintain do fim de
+        # sessao nao espera: se outra sessao ja esta mantendo, esta rodada pula
+        if trava(esperar=a.func is not cmd_maintain) is None:
+            if a.func is cmd_maintain:
+                sys.exit(0)
+            print(f"cortex: outro processo segura {LOCK} ha mais de {LOCK_WAIT_S}s; nada foi gravado",
+                  file=sys.stderr)
+            sys.exit(4)
+    try:
+        rc = a.func(a) or 0
+    except StoreError as e:
+        print(f"cortex: {e}", file=sys.stderr)
+        rc = 3
+    sys.exit(rc)
 
 
 if __name__ == "__main__":
