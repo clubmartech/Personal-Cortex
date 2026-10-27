@@ -499,7 +499,7 @@ def ponte(d=None, alvos=None):
         else:
             novo = (antigo.rstrip() + "\n\n" if antigo.strip() else "") + bloco
         if novo != antigo:
-            tmp = alvo + ".tmp-trilhas"
+            tmp = f"{alvo}.{os.getpid()}.tmp-trilhas"   # unico por processo: nome fixo deixa um gravador truncar o outro
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(novo)
             os.replace(tmp, alvo)
