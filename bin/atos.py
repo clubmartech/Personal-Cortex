@@ -16,6 +16,10 @@ Subcomandos:
                                        desvios → output final, por conversa
   ponte [--alvo arquivo …]             grava o bloco de trilhas no AGENTS.md do Codex (ou outro alvo)
   importar [--claude pasta] [--codex pasta]   semeia com o histórico local (só sessões abertas por pessoa)
+  loops [--desde AAAA-MM-DD] [--projeto trecho] [--min 3] [--max-arquivos 60] [--candidatos]
+                                       lê as transcrições do Claude Code (sem LLM) e lista chamadas repetidas
+                                       com a mesma saída e pares falha→sucesso que se repetem em ≥2 sessões;
+                                       --candidatos grava no inbox do Cortex (nunca promove sozinho)
   classificar "<texto>"                mostra ato, domínio e riscos de um texto
   status                               contagens
 
@@ -720,6 +724,132 @@ def importar(claude=None, codex=None):
     return n
 
 
+# ------------------------------------------------------------------ loops (sem LLM)
+FERRAMENTAS_LOOP = {"Bash", "Read", "Grep", "Glob", "WebFetch", "WebSearch"}
+_TRIVIAL = re.compile(r"^(git (status|diff --stat|log)|ls|pwd|date|sleep|echo|cat \S+$)")
+
+
+def _assinatura(nome, inp):
+    """Chamada normalizada: ignora paginação e corte, que só mudam o tamanho da saída."""
+    inp = inp or {}
+    if nome == "Bash":
+        c = re.sub(r"\s+", " ", str(inp.get("command", ""))).strip()
+        c = re.sub(r"\s*2>&1", "", c)
+        c = re.sub(r"\s*\|\s*(head|tail)\b[^|;&]*", "", c)
+        return c[:110]
+    if nome == "Read":
+        return str(inp.get("file_path", ""))
+    if nome in ("Grep", "Glob"):
+        return "%s @ %s" % (inp.get("pattern", ""), inp.get("path", ""))
+    return str(inp.get("url") or inp.get("query") or "")[:160]
+
+
+def _hash_resultado(c):
+    return hashlib.sha1(json.dumps(c, sort_keys=True, ensure_ascii=False)[:4000].encode()).hexdigest()[:10]
+
+
+def _varrer_sessao(caminho):
+    usos, resultados, cwd = [], {}, None
+    try:
+        with open(caminho, encoding="utf-8", errors="replace") as f:
+            for l in f:
+                if '"tool_use"' not in l and '"tool_result"' not in l:
+                    continue
+                try:
+                    d = json.loads(l)
+                except ValueError:
+                    continue
+                cwd = cwd or d.get("cwd")
+                c = (d.get("message") or {}).get("content")
+                if not isinstance(c, list):
+                    continue
+                for b in c:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_use" and b.get("name") in FERRAMENTAS_LOOP and not d.get("isSidechain"):
+                        usos.append((b.get("id"), b["name"], _assinatura(b["name"], b.get("input"))))
+                    elif b.get("type") == "tool_result":
+                        resultados[b.get("tool_use_id")] = (bool(b.get("is_error")), _hash_resultado(b.get("content")))
+    except OSError:
+        pass
+    return usos, resultados, cwd
+
+
+def _cortex():
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("cortex_mod", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cortex.py"))
+    m = importlib.util.module_from_spec(sp)
+    sp.loader.exec_module(m)
+    return m
+
+
+def loops(desde=None, projeto=None, minimo=3, max_arquivos=60, candidatos=False):
+    cx = _cortex()
+    limite = datetime.strptime(desde, "%Y-%m-%d").timestamp() if desde else (datetime.now() - timedelta(days=14)).timestamp()
+    arquivos = [p for p in glob.glob(os.path.join(HOME, ".claude", "projects", "*", "*.jsonl"))
+                if os.path.getmtime(p) >= limite and (not projeto or projeto.lower() in os.path.basename(os.path.dirname(p)).lower())]
+    arquivos = sorted(sorted(arquivos, key=os.path.getmtime, reverse=True)[:max_arquivos], key=os.path.getmtime)
+    repet = defaultdict(lambda: {"sessoes": set(), "max": 0})
+    pares = defaultdict(set)
+    vistos = set()   # sessão retomada copia o histórico: cada chamada conta só no arquivo onde apareceu primeiro
+    for p in arquivos:
+        usos, resultados, cwd = _varrer_sessao(p)
+        usos = [u for u in usos if u[0] not in vistos]
+        vistos.update(u[0] for u in usos)
+        proj = slug(cwd or "")
+        grupos = defaultdict(list)
+        for i, (uid, nome, sig) in enumerate(usos):
+            if not sig or _TRIVIAL.match(sig):
+                continue
+            err, h = resultados.get(uid, (False, None))
+            grupos[(nome, sig)].append((err, h))
+            if err and nome in ("Read", "Grep", "Glob"):
+                for _, n2, s2 in usos[i + 1:i + 4]:
+                    if n2 == nome and s2 != sig and not resultados.get(_, (True, None))[0]:
+                        pares[(proj, nome, sig, s2)].add(p)
+                        break
+        for (nome, sig), lst in grupos.items():
+            mais = Counter(h for _, h in lst if h).most_common(1)
+            if mais and mais[0][1] >= minimo:
+                r = repet[(proj, nome, sig)]
+                r["sessoes"].add(p)
+                r["max"] = max(r["max"], mais[0][1])
+    saida = ["# Loops e tropeços nas transcrições",
+             "Janela: %d arquivo(s) desde %s · sem LLM · só candidatos, nada vira regra sozinho.\n" % (
+                 len(arquivos), datetime.fromtimestamp(limite).strftime("%Y-%m-%d"))]
+    itens = []
+    r1 = sorted(((k, v) for k, v in repet.items() if len(v["sessoes"]) >= 2), key=lambda kv: -len(kv[1]["sessoes"]))
+    saida.append("## Repetição com a mesma saída (≥%d× numa sessão, em ≥2 sessões)" % minimo)
+    for (proj, nome, sig), v in r1[:20]:
+        saida.append("- [%s] `%s: %s` — %d sessões, até %d× seguidas sem mudar o resultado" % (proj, nome, cx.sanitizar(sig), len(v["sessoes"]), v["max"]))
+        itens.append({"text": "No projeto %s, `%s: %s` é repetido várias vezes com a mesma saída (visto em %d sessões); trate a causa antes de rodar de novo."
+                      % (proj, nome, cx.sanitizar(sig), len(v["sessoes"])), "scope": "project", "project": proj, "kind": "project",
+                      "why": "mineração de transcrições (atos.py loops)"})
+    if not r1:
+        saida.append("- nenhuma")
+    saida.append("\n## Falha → sucesso que se repete (≥2 sessões)")
+    r2 = sorted(((k, v) for k, v in pares.items() if len(v) >= 2), key=lambda kv: -len(kv[1]))
+    for (proj, nome, a, b), v in r2[:20]:
+        saida.append("- [%s] %s `%s` falhou; `%s` funcionou — %d sessões" % (proj, nome, cx.sanitizar(a), cx.sanitizar(b), len(v)))
+        itens.append({"text": "No projeto %s, %s `%s` costuma falhar; o que funciona é `%s` (visto em %d sessões)."
+                      % (proj, nome, cx.sanitizar(a), cx.sanitizar(b), len(v)), "scope": "project", "project": proj, "kind": "project",
+                      "why": "mineração de transcrições (atos.py loops)"})
+    if not r2:
+        saida.append("- nenhum")
+    if candidatos:
+        existentes = {r["id"] for r in cx.load()}
+        inbox = os.path.join(ROOT, "inbox", "atos-loops.jsonl")
+        # o que já espera no inbox também conta: rodar duas vezes antes do absorb promoveria sozinho (2 ocorrências)
+        existentes |= {cx.rid("project", i.get("project"), i.get("text", "")) for i in cx.read_jsonl(inbox)}
+        novos = [i for i in itens if cx.rid("project", i["project"], i["text"]) not in existentes]
+        os.makedirs(os.path.join(ROOT, "inbox"), exist_ok=True)
+        with open(inbox, "a", encoding="utf-8") as f:
+            for i in novos:
+                f.write(json.dumps(i, ensure_ascii=False) + "\n")
+        saida.append("\ncandidatos gravados no inbox: %d (já no store: %d). `cortex absorb` os lê como candidatos." % (len(novos), len(itens) - len(novos)))
+    return "\n".join(saida) + "\n"
+
+
 def _arg(args, nome, padrao=None):
     return args[args.index(nome) + 1] if nome in args and args.index(nome) + 1 < len(args) else padrao
 
@@ -754,6 +884,10 @@ def main(argv):
                 print("gravado: %s" % saida)
             else:
                 sys.stdout.write(texto)
+            return 0
+        if cmd == "loops":
+            sys.stdout.write(loops(_arg(args, "--desde"), _arg(args, "--projeto"), int(_arg(args, "--min", 3)),
+                                   int(_arg(args, "--max-arquivos", 60)), "--candidatos" in args))
             return 0
         if cmd == "ponte":
             alvos = [args[i + 1] for i, a in enumerate(args) if a == "--alvo" and i + 1 < len(args)] or None

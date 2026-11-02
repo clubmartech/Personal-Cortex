@@ -48,6 +48,8 @@ Além de regras, o Cortex mapeia **o tipo de cada pedido** (viabilidade, desenho
 - **Previsão de falha:** cada pedido leva domínio, riscos de entendimento (referência vaga, pedidos múltiplos) e provável erro de digitação contra o vocabulário real da pessoa; a classificação lê a intenção corrigida. As correções ensinam onde o entendimento costuma falhar.
 - **Leitura de período:** `atos.py linha --desde AAAA-MM-DD [--dominio audiovisual|textual]` monta, por conversa, objetivo → degraus → desvios → output final.
 - **Codex:** importa as sessões abertas por pessoa (ignora `codex exec` disparado por script), instala o hook `--fonte codex` em `~/.codex/hooks.json` e mantém o bloco `CORTEX-TRILHAS` no `~/.codex/AGENTS.md`, com seções de conteúdo audiovisual e textual. `CORTEX_SEM_CODEX=1` desliga.
+- **Âncora e saneamento:** `cortex observe … --ancora ARQUIVO[:INI-FIM]` guarda o hash do arquivo que sustenta a regra; `cortex verify` só sinaliza a que ficou obsoleta. Todo texto que entra no store passa por saneamento (chaves, tokens, senhas, `<private>`).
+- **Loops:** `atos.py loops [--desde AAAA-MM-DD] [--candidatos]` lista chamadas repetidas e pares falha→sucesso nas transcrições, sem modelo.
 - **Ajuste:** `atos-regras.json` acrescenta padrões e troca a forma esperada de cada ato. `atos.py classificar "texto"` mostra como um pedido seria lido.
 
 Linha sugerida para o `~/.claude/CLAUDE.md`:
@@ -64,7 +66,7 @@ Linha sugerida para o `~/.claude/CLAUDE.md`:
 | Injeção | início de sessão (hook `SessionStart`) | `cortex context` entrega perfil, princípios e regras do projeto atual |
 | Captura | durante o trabalho | o assistente chama `observe/supersede/forget` |
 | Destilação | `/cortex-loop`, sob demanda ou com `/loop` | separa sinal de ruído da sessão |
-| Manutenção | fim de sessão (hook `SessionEnd`) | `cortex maintain` = absorb + promote + prune + sync |
+| Manutenção | fim de sessão (hook `SessionEnd`) | `cortex maintain` = absorb + promote + prune + verify + sync |
 | Curadoria | semanal, `/cortex-consolidar` | funde, corrige, poda e registra a direção da evolução |
 
 ## Comandos

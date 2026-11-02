@@ -56,8 +56,17 @@ cortex forget <id> --reason "<motivo>"
 cortex context [--project <path>]     # bloco injetado na sessão
 cortex list [--status candidate|active|archived|superseded]
 cortex status                          # saúde: sinal/ruído, consolidadas, atividade 7d
-cortex maintain                        # absorb + promote + prune + sync
+cortex maintain                        # absorb + promote + prune + verify + sync
+cortex observe "<fato do projeto>" --scope project --project <path> --ancora <arquivo>[:ini-fim]
+cortex verify [--reancorar <id>]       # regra cujo arquivo-âncora mudou/sumiu ganha aviso "confirme antes de usar"
+atos.py loops [--desde AAAA-MM-DD] [--candidatos]   # chamadas repetidas e falha→sucesso nas transcrições (sem LLM)
 ```
+
+- **Âncora:** fato de projeto que depende de um arquivo (caminho, config, convenção) deve levar `--ancora`.
+  O hash fica no store; `verify` (já parte do `maintain`) só **sinaliza**, nunca apaga. Depois de conferir, `verify --reancorar <id>`.
+- **Saneamento:** `observe`, `supersede` e `absorb` redigem chaves, tokens, senhas, `<private>…</private>` e os marcadores
+  `CORTEX:BEGIN/END` antes de gravar (o store é espelhado para Codex, Gemini e Cursor). Nunca cole segredo esperando que a regra o guarde.
+- **Loops:** `atos.py loops` é relatório; `--candidatos` grava no inbox e `absorb` os trata como candidatos (sem promoção automática).
 
 `--kind`: `identity` (quem é) · `preference` (gosto/formato) · `principle` (lei de
 engenharia) · `workflow` (como conduz o trabalho) · `project` (fato do repositório)

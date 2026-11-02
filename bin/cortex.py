@@ -9,7 +9,7 @@ e' RENDER gerado a partir do store. Nao edite os renders a mao.
 Ciclo:  observe -> promote (com evidencia) -> render -> sync (ensina outras apps)
         absorb (aprende de outras apps) -> prune (decai o que nao se sustenta)
 """
-import argparse, fcntl, glob, hashlib, json, os, re, shutil, sys, time, unicodedata, uuid
+import argparse, fcntl, glob, hashlib, json, os, re, shutil, sys, threading, time, unicodedata, uuid
 from datetime import datetime, timedelta, timezone
 
 HOME = os.path.expanduser("~")
@@ -195,8 +195,171 @@ def save(rows):
     write_jsonl(STORE, rows)
 
 
+
+# ---------------------------------------------------------------- saneamento
+# Funil unico por onde todo texto entra no store (observe, supersede, absorb).
+# O store e' espelhado para Codex, Gemini, Cursor etc.; segredo colado aqui vazaria
+# para todos. Troca o valor por marcador e preserva o resto da regra.
+SEGREDO = "[segredo redigido]"
+_PADROES_SEGREDO = [
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.S),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}"),
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}"),
+    re.compile(r"(?i)\b(?:password|passwd|senha|secret|api[_-]?key|access[_-]?token|auth[_-]?token|token)\b(\s*[:=]\s*)[\"']?[^\s\"',;]{8,}"),
+]
+_PRIVADO = re.compile(r"<private>.*?</private>", re.S | re.I)
+_TAG_SISTEMA = re.compile(r"</?\s*system-reminder[^>]*>", re.I)
+_MARCAS = re.compile(r"CORTEX:(?:BEGIN|END)", re.I)
+_REDIGIDOS = []   # contador por processo, so para avisar
+
+
+def sanitizar(text):
+    """Remove <private>, tags de sistema, marcadores de sync e segredos conhecidos."""
+    if not text:
+        return text
+    t = _PRIVADO.sub("", text)
+    t = _TAG_SISTEMA.sub("", t)
+    t = _MARCAS.sub("CORTEX-", t)
+    for pat in _PADROES_SEGREDO:
+        if pat.groups:   # chave=valor: preserva o nome do campo
+            t, n = pat.subn(lambda m: m.group(0)[: m.start(1) - m.start(0)] + m.group(1) + SEGREDO, t)
+        else:
+            t, n = pat.subn(SEGREDO, t)
+        if n:
+            _REDIGIDOS.append(n)
+    return t.strip()
+
+
+def _aviso_redacao():
+    if _REDIGIDOS:
+        print(f"aviso: {sum(_REDIGIDOS)} trecho(s) com cara de segredo foram redigidos antes de gravar", file=sys.stderr)
+        _REDIGIDOS.clear()
+
+
+# ------------------------------------------------------------------ ancoras
+# Regra de projeto pode apontar para o arquivo que a sustenta (caminho[:ini-fim]).
+# O store guarda o hash curto; `cortex verify` marca como possivelmente obsoleta a
+# regra cuja ancora mudou ou sumiu. Nunca apaga nem arquiva: so sinaliza.
+ANCORA_TIMEOUT = 3   # s por arquivo; Drive File Stream as vezes trava em arquivo frio
+
+
+def _parse_ancora(spec):
+    path, lines = spec, None
+    m = re.match(r"^(.*):(\d+(?:-\d+)?)$", spec)
+    if m:
+        path, lines = m.group(1), m.group(2)
+    return os.path.abspath(os.path.expanduser(path)), lines
+
+
+def _ancora_hash(path, lines=None):
+    """hash curto do arquivo (ou das linhas); None = ausente; "?" = nao respondeu a tempo."""
+    box = {}
+
+    def work():
+        try:
+            data = open(path, "rb").read()
+            if lines:
+                ini, _, fim = lines.partition("-")
+                i, j = int(ini), int(fim or ini)
+                data = b"".join(data.splitlines(keepends=True)[i - 1:j])
+            box["h"] = hashlib.sha256(data).hexdigest()[:12]
+        except (OSError, ValueError):
+            box["h"] = None
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(ANCORA_TIMEOUT)
+    return box["h"] if "h" in box else "?"
+
+
+def _estado_ancora(an):
+    h = _ancora_hash(an["path"], an.get("lines"))
+    if h == "?":
+        return "indeterminado"
+    if h is None:
+        return "ausente"
+    return "ok" if h == an["sha"] else "alterado"
+
+
+def _fmt_ancora(an):
+    return an["path"] + (f":{an['lines']}" if an.get("lines") else "")
+
+
+def _marca_obsoleta(r):
+    v = r.get("verify")
+    return " [ancora " + v["state"] + ": confirme no arquivo antes de usar]" if v else ""
+
+
+def cmd_verify(a):
+    rows = load()
+    if a.reancorar:
+        r = next((x for x in rows if x["id"] == a.reancorar), None)
+        if not r or not r.get("anchors"):
+            print("erro: regra sem ancora", file=sys.stderr)
+            return 1
+        for an in r["anchors"]:
+            h = _ancora_hash(an["path"], an.get("lines"))
+            if h in (None, "?"):
+                print(f"erro: nao consegui ler {_fmt_ancora(an)}", file=sys.stderr)
+                return 1
+            an["sha"], an["at"] = h, today()
+        r.pop("verify", None)
+        r["updated"] = today()
+        save(rows)
+        print(f"reancorado {r['id']}")
+        return 0
+    original = json.dumps(rows, sort_keys=True)
+    marcadas, total = [], 0
+    for r in rows:
+        if r.get("status") != "active" or not r.get("anchors"):
+            continue
+        total += 1
+        det = [(an, _estado_ancora(an)) for an in r["anchors"]]
+        ruins = [(an, st) for an, st in det if st in ("alterado", "ausente")]
+        antes = (r.get("verify") or {}).get("state")
+        if ruins:
+            pior = "ausente" if any(st == "ausente" for _, st in ruins) else "alterado"
+            r["verify"] = {"state": pior, "checked": today(),
+                           "details": [f"{st}: {_fmt_ancora(an)}" for an, st in ruins]}
+            if antes != pior:
+                log_event("stale", r, "; ".join(r["verify"]["details"]))
+            marcadas.append(r)
+        elif antes and all(st == "ok" for _, st in det):
+            r.pop("verify", None)
+    if json.dumps(rows, sort_keys=True) != original:   # gravar so quando mudou reduz colisao
+        save(rows)
+    if not a.quiet:
+        print(f"ancoras verificadas em {total} regra(s); possivelmente obsoletas: {len(marcadas)}")
+        for r in marcadas:
+            print(f"  {r['id']} {r['verify']['state']}: {r['text'][:90]}")
+            for d in r["verify"]["details"]:
+                print(f"      {d}")
+    return 0
+
+
 # ------------------------------------------------------------------ observe
 def cmd_observe(a):
+    a.text = sanitizar(a.text)
+    a.why = sanitizar(a.why or "")
+    a.evidence = sanitizar(a.evidence) if a.evidence else a.evidence
+    _aviso_redacao()
+    if not a.text:
+        print("erro: texto vazio apos saneamento", file=sys.stderr)
+        return 1
+    anchors = []
+    for spec in (getattr(a, "ancora", None) or []):
+        path, lines = _parse_ancora(spec)
+        h = _ancora_hash(path, lines)
+        if h in (None, "?"):
+            print(f"erro: ancora ilegivel ou ausente: {spec}", file=sys.stderr)
+            return 1
+        anchors.append({"path": path, "lines": lines, "sha": h, "at": today()})
     rows = load()
     project = slugify(a.project) if a.scope == "project" else None
     if a.scope == "project" and not project:
@@ -215,6 +378,12 @@ def cmd_observe(a):
             existing["evidence"] = ev[-3:]
         if a.why and not existing.get("why"):
             existing["why"] = a.why
+        if anchors:
+            cur = {(x["path"], x.get("lines")): x for x in existing.get("anchors", [])}
+            for x in anchors:
+                cur[(x["path"], x.get("lines"))] = x   # reforco com a mesma ancora a renova
+            existing["anchors"] = list(cur.values())
+            existing.pop("verify", None)
         if existing.get("status") == "archived":
             existing["status"] = "active"
             log_event("reactivated", existing)
@@ -236,6 +405,8 @@ def cmd_observe(a):
         "source": [a.source], "evidence": [a.evidence] if a.evidence else [],
         "supersedes": a.supersedes or None,
     }
+    if anchors:
+        rec["anchors"] = anchors
     rows.append(rec)
     if a.supersedes:
         for r in rows:
@@ -251,6 +422,9 @@ def cmd_observe(a):
 
 
 def cmd_supersede(a):
+    a.text = sanitizar(a.text)
+    a.why = sanitizar(a.why) if a.why else a.why
+    _aviso_redacao()
     rows = load()
     old = next((r for r in rows if r["id"] == a.old_id), None)
     if not old:
@@ -347,7 +521,7 @@ def _bullets(items, with_why=True):
     for r in sorted(items, key=lambda x: (-x.get("seen", 1), x.get("updated", ""))):
         mark = "!" if r.get("explicit") else ("*" if r.get("seen", 1) >= STRONG_SEEN else "")
         why = f" — _{r['why']}_" if with_why and r.get("why") else ""
-        lines.append(f"- {r['text']}{why} <!-- {r['id']} seen:{r.get('seen',1)} {mark} -->")
+        lines.append(f"- {r['text']}{_marca_obsoleta(r)}{why} <!-- {r['id']} seen:{r.get('seen',1)} {mark} -->")
     return lines
 
 
@@ -408,7 +582,7 @@ def render_all():
 def render_evolution(limit=120):
     events = read_jsonl(EVENTS)[-limit:]
     icon = {"observed": "·", "promoted": "+", "superseded": "~", "archived": "-",
-            "dropped": "x", "reactivated": "^", "absorbed": "<"}
+            "dropped": "x", "reactivated": "^", "absorbed": "<", "stale": "?"}
     out = ["<!-- GERADO por cortex.py -->", "# Evolucao do raciocinio\n",
            "Linha do tempo do que foi aprendido, revisado e descartado.",
            "`+` promovido · `~` substituido (mudanca de opiniao) · `-` arquivado por desuso · "
@@ -449,7 +623,7 @@ def cmd_context(a):
         # nao texto de inferencia: injetar so a regra.
         buf, used, shown = [f"### {title}"], 0, 0
         for k, v in _group(items).items():
-            chunk = [f"**{KIND_LABEL.get(k,k)}**"] + [f"- {r['text']}" for r in
+            chunk = [f"**{KIND_LABEL.get(k,k)}**"] + [f"- {r['text']}{_marca_obsoleta(r)}" for r in
                      sorted(v, key=lambda x: (-x.get("seen", 1), x.get("updated","")))]
             text = "\n".join(chunk)
             if used + len(text) > budget:
@@ -595,9 +769,11 @@ def cmd_absorb(a):
         src = os.path.splitext(name)[0]
         path = os.path.join(INBOX_DIR, name)
         for item in read_jsonl(path):
-            text = (item.get("text") or "").strip()
+            text = sanitizar((item.get("text") or "").strip())
             if not text:
                 continue
+            item["why"] = sanitizar(item.get("why", ""))
+            _aviso_redacao()
             ns = argparse.Namespace(
                 scope=item.get("scope", "global"),
                 project=item.get("project"),
@@ -676,7 +852,8 @@ def cmd_list(a):
 
 def cmd_maintain(a):
     ns = argparse.Namespace(quiet=True)
-    cmd_absorb(ns); cmd_promote(ns); cmd_prune(ns); cmd_sync(ns)
+    cmd_absorb(ns); cmd_promote(ns); cmd_prune(ns)
+    cmd_verify(argparse.Namespace(quiet=True, reancorar=None)); cmd_sync(ns)
     if not a.quiet:
         cmd_status(a)
     return 0
@@ -696,6 +873,8 @@ def main():
     o.add_argument("--project", default=None, help="caminho do projeto (para --scope project)")
     o.add_argument("--why", default="", help="por que isso e' verdade (evidencia curta)")
     o.add_argument("--evidence", default=None)
+    o.add_argument("--ancora", action="append", default=None, metavar="CAMINHO[:INI-FIM]",
+                   help="arquivo (ou linhas) que sustenta a regra; guarda o hash e permite `cortex verify`")
     o.add_argument("--explicit", action="store_true", help="pedido direto do usuario: vira ativo na hora")
     o.add_argument("--source", default="claude-code")
     o.add_argument("--supersedes", default=None)
@@ -722,12 +901,17 @@ def main():
         ("render", cmd_render, "regenera os arquivos .md"),
         ("sync", cmd_sync, "ensina as outras ferramentas locais"),
         ("absorb", cmd_absorb, "aprende com o inbox de outras ferramentas"),
-        ("maintain", cmd_maintain, "absorb + promote + prune + sync"),
+        ("maintain", cmd_maintain, "absorb + promote + prune + verify + sync"),
         ("status", cmd_status, "saude da memoria"),
     ]:
         sp = sub.add_parser(name, help=helptxt)
         sp.add_argument("--quiet", action="store_true")
         sp.set_defaults(func=fn)
+
+    v = sub.add_parser("verify", help="confere se os arquivos-ancora das regras ainda sao os mesmos")
+    v.add_argument("--quiet", action="store_true")
+    v.add_argument("--reancorar", default=None, metavar="ID", help="aceita o conteudo atual como a nova ancora da regra")
+    v.set_defaults(func=cmd_verify)
 
     l = sub.add_parser("list", help="lista regras")
     l.add_argument("--status", default=None)
